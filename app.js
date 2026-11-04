@@ -55,7 +55,7 @@ function resetLockTimer() {
 }
 function lock() {
   key = null; vault = loadVault(); currentId = null; currentPlainPassword = null;
-  $('vaultScreen').hidden = true; $('changePassCard').hidden = true;
+  $('vaultScreen').hidden = true; $('changePassCard').hidden = true; $('importCard').hidden = true;
   $('lockScreen').hidden = false;
   renderLock();
 }
@@ -113,6 +113,22 @@ function filteredAccounts() {
     return [a.name, a.username, a.url, a.notes, a.category].join(' ').toLowerCase().includes(q);
   }).sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
 }
+async function copyPasswordById(id, btn) {
+  try {
+    const a = vault.accounts.find(x => x.id === id); if (!a) return false;
+    const pw = currentPlainPassword && currentId === id ? currentPlainPassword : await decryptText(key, a.passwordEnc);
+    try { await navigator.clipboard.writeText(pw); }
+    catch (e) {
+      const ta = document.createElement('textarea'); ta.value = pw; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      const ok = document.execCommand('copy'); document.body.removeChild(ta);
+      if (!ok) throw e;
+    }
+    if (btn) { const old = btn.textContent; btn.textContent = '已复制'; setTimeout(() => { btn.textContent = old; }, 1500); }
+    resetLockTimer();
+    return true;
+  } catch (e) { alert('复制失败：' + (e.message || String(e)) + '。请确认是在 https 或 http://localhost 下打开本页。'); return false; }
+}
 function renderList() {
   const cats = [...new Set((vault.accounts || []).map(a => a.category).filter(Boolean))].sort();
   const sel = $('categoryFilter'); const cur = sel.value;
@@ -126,12 +142,76 @@ function renderList() {
   list.forEach(a => {
     const li = document.createElement('li');
     const star = a.favorite ? ' ★' : '';
-    li.innerHTML = `<div><strong></strong><div class="meta"></div></div><span>›</span>`;
-    li.querySelector('strong').textContent = a.name + star;
-    li.querySelector('.meta').textContent = [a.category, a.username].filter(Boolean).join(' · ');
+    // 同一平台多个账号时，列表主标题就带上用户名，避免只看名称分不清。
+    li.innerHTML = `<div><strong></strong><div class="meta"></div></div><div class="row"><button type="button">复制密码</button><span>›</span></div>`;
+    li.querySelector('strong').textContent = (a.username ? a.name + ' · ' + a.username : a.name) + star;
+    li.querySelector('.meta').textContent = [a.category, a.url].filter(Boolean).join(' · ') || '—';
+    li.querySelector('button').addEventListener('click', (e) => { e.stopPropagation(); copyPasswordById(a.id, e.currentTarget); });
     li.addEventListener('click', () => showDetail(a.id));
     ul.appendChild(li);
   });
+}
+function parseCSV(text) {
+  const rows = []; let row = []; let cur = ''; let inQuotes = false;
+  const t = text.replace(/^\uFEFF/, '');
+  for (let i = 0; i < t.length; i++) {
+    const c = t[i];
+    if (inQuotes) {
+      if (c === '"') { if (t[i + 1] === '"') { cur += '"'; i++; } else inQuotes = false; }
+      else cur += c;
+    } else if (c === '"') inQuotes = true;
+    else if (c === ',') { row.push(cur); cur = ''; }
+    else if (c === '\n') { row.push(cur); rows.push(row); row = []; cur = ''; }
+    else if (c !== '\r') cur += c;
+  }
+  if (cur !== '' || row.length) { row.push(cur); rows.push(row); }
+  const clean = rows.filter(r => r.some(v => String(v || '').trim() !== ''));
+  if (!clean.length) return [];
+  const header = clean[0].map(h => String(h || '').trim().toLowerCase());
+  const mapKey = (h) => ({ note: 'notes', website: 'url', site: 'url' }[h] || h);
+  return clean.slice(1).map((r, idx) => {
+    const o = { _row: idx + 2 };
+    header.forEach((h, i) => { o[mapKey(h)] = (r[i] || '').trim(); });
+    return o;
+  });
+}
+function parseImportText(text) {
+  const t = text.trim();
+  if (!t) return [];
+  if (t.startsWith('[') || t.startsWith('{')) {
+    const data = JSON.parse(t);
+    const arr = Array.isArray(data) ? data : (Array.isArray(data.accounts) ? data.accounts : null);
+    if (!arr) throw new Error('JSON 格式不对：需要是一个数组，或含 accounts 数组的对象。');
+    return arr.map((o, i) => ({ ...o, _row: i + 1 }));
+  }
+  return parseCSV(t);
+}
+async function doImport() {
+  const file = $('importFile').files[0];
+  if (!file) return showError('importError', '请先选择一个 JSON 或 CSV 文件。');
+  showError('importError', '');
+  $('importResult').textContent = '正在导入…';
+  try {
+    const text = await file.text();
+    const rows = parseImportText(text);
+    if (!rows.length) throw new Error('文件里没有可导入的数据行。');
+    const seen = new Set((vault.accounts || []).map(a => (a.name + '\0' + (a.username || '')).toLowerCase()));
+    let imported = 0, skipped = 0; const failures = [];
+    for (const r of rows) {
+      const name = String(r.name || '').trim();
+      const password = String(r.password || '');
+      if (!name || !password) { failures.push(`第 ${r._row} 行：缺少名称或密码`); continue; }
+      const k = (name + '\0' + String(r.username || '').trim()).toLowerCase();
+      if (seen.has(k)) { skipped++; continue; }
+      seen.add(k);
+      const passwordEnc = await encryptText(key, password);
+      vault.accounts.push({ id: 'a' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7) + imported, name, category: String(r.category || '').trim(), username: String(r.username || '').trim(), url: String(r.url || '').trim(), notes: String(r.notes || '').trim(), favorite: !!r.favorite, passwordEnc, createdAt: Date.now(), updatedAt: Date.now() });
+      imported++;
+    }
+    saveVault(); renderList(); resetLockTimer();
+    $('importResult').textContent = `导入完成：成功 ${imported} 条，跳过重复 ${skipped} 条，失败 ${failures.length} 条。` + (failures.length ? '失败明细：' + failures.slice(0, 20).join('；') : '') + ' 请删除刚才的明文导入文件。';
+    $('importFile').value = '';
+  } catch (e) { showError('importError', e.message || String(e)); $('importResult').textContent = ''; }
 }
 async function showDetail(id) {
   const a = vault.accounts.find(x => x.id === id); if (!a) return;
@@ -213,10 +293,15 @@ document.addEventListener('DOMContentLoaded', () => {
       else { const a = vault.accounts.find(x => x.id === currentId); currentPlainPassword = await decryptText(key, a.passwordEnc); $('detailPassword').textContent = currentPlainPassword; $('detailToggleBtn').textContent = '隐藏'; }
     } catch (e) { alert(e.message || String(e)); }
   });
-  $('detailCopyBtn').addEventListener('click', async () => {
-    try { const a = vault.accounts.find(x => x.id === currentId); const pw = currentPlainPassword || await decryptText(key, a.passwordEnc); await navigator.clipboard.writeText(pw); alert('密码已复制。'); }
-    catch (e) { alert('复制失败：' + (e.message || String(e))); }
+  $('detailCopyBtn').addEventListener('click', async (e) => { await copyPasswordById(currentId, e.currentTarget); });
+  $('importBtn').addEventListener('click', () => { $('importCard').hidden = false; $('formCard').hidden = true; $('detailCard').hidden = true; $('importResult').textContent = ''; showError('importError', ''); $('importFile').value = ''; });
+  $('cancelImportBtn').addEventListener('click', () => { $('importCard').hidden = true; });
+  $('downloadTemplateBtn').addEventListener('click', () => {
+    const csv = 'name,category,username,password,url,notes\n示例平台,社交,示例账号,请替换成真实密码,https://example.com,这是模板里的示例行，导入前请改成你自己的账号\n';
+    const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' });
+    const aEl = document.createElement('a'); aEl.href = URL.createObjectURL(blob); aEl.download = 'accounts-import-template.csv'; aEl.click(); URL.revokeObjectURL(aEl.href);
   });
+  $('doImportBtn').addEventListener('click', doImport);
   $('exportBtn').addEventListener('click', async () => {
     try {
       const out = [];

@@ -13,6 +13,7 @@
     <p class="sub">主密码加密 · 本地保存 · 不上传真实密码到任何服务器</p>
   </div>
   <div class="top-actions" id="topActions" hidden>
+    <button id="importBtn" type="button">批量导入</button>
     <button id="exportBtn" type="button">导出</button>
     <button id="changePassBtn" type="button">修改主密码</button>
     <button id="lockBtn" type="button">锁定</button>
@@ -75,6 +76,24 @@
       <div class="row">
         <button id="saveBtn" type="button" class="primary">保存</button>
         <button id="cancelBtn" type="button">取消</button>
+      </div>
+    </section>
+
+    <section id="importCard" class="card" hidden>
+      <h2>批量导入</h2>
+      <p class="hint">文件只在你本机浏览器里读取，不会上传。导入后每条密码会立即用主密码加密保存。导入文件本身是明文，导入完请删除源文件，不要发给任何人，也不要发在聊天里。</p>
+      <label>选择文件
+        <input id="importFile" type="file" accept=".json,.csv,text/csv,application/json">
+      </label>
+      <p class="hint">支持两种格式：JSON 就是本平台导出那种数组，每条含 name、username、password，category、url、notes 可选；CSV 第一行表头是 name,category,username,password,url,notes，其中 name 和 password 必填。同一平台多个账号没问题，只要用户名不同就不会被当成重复。</p>
+      <div class="row">
+        <button id="downloadTemplateBtn" type="button">下载 CSV 模板</button>
+      </div>
+      <p id="importResult" class="hint"></p>
+      <p class="error" id="importError" hidden></p>
+      <div class="row">
+        <button id="doImportBtn" type="button" class="primary">开始导入</button>
+        <button id="cancelImportBtn" type="button">取消</button>
       </div>
     </section>
 
