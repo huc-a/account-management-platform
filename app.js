@@ -4,8 +4,29 @@ const VERIFIER_TEXT = 'amp-verifier';
 const ITERATIONS = 210000;
 const LOCK_MS = 5 * 60 * 1000;
 
-let vault = null; // {salt, verifier, accounts: []}
+let vault = null; // {salt, verifier, accounts: [], categories: [{name, color}]}
 let key = null;
+const DEFAULT_CATEGORIES = [
+  { name: '社交', color: '#4f7cff' },
+  { name: '邮箱', color: '#e67e22' },
+  { name: '金融', color: '#27ae60' },
+  { name: '购物', color: '#e74c3c' },
+  { name: '娱乐', color: '#9b59b6' },
+  { name: '工作', color: '#2980b9' },
+  { name: '游戏', color: '#16a085' },
+  { name: '其他', color: '#7f8c8d' },
+];
+function ensureCategories() {
+  if (!vault) return;
+  if (!Array.isArray(vault.categories) || !vault.categories.length) {
+    vault.categories = DEFAULT_CATEGORIES.map(c => ({ ...c }));
+    const existing = [...new Set((vault.accounts || []).map(a => a.category).filter(Boolean))];
+    existing.forEach(name => { if (!vault.categories.some(c => c.name === name)) vault.categories.push({ name, color: '#4f7cff' }); });
+  } else {
+    vault.categories = vault.categories.map(c => (typeof c === 'string' ? { name: c, color: '#4f7cff' } : c));
+    if (!vault.categories.some(c => c.name === '其他')) vault.categories.push({ name: '其他', color: '#7f8c8d' });
+  }
+}
 let currentId = null;
 let currentPlainPassword = null;
 let lockTimer = null;
@@ -55,7 +76,7 @@ function resetLockTimer() {
 }
 function lock() {
   key = null; vault = loadVault(); currentId = null; currentPlainPassword = null;
-  $('vaultScreen').hidden = true; $('changePassCard').hidden = true; $('importCard').hidden = true;
+  $('vaultScreen').hidden = true; $('changePassCard').hidden = true; $('importCard').hidden = true; $('backupCard').hidden = true; $('categoryCard').hidden = true;
   $('lockScreen').hidden = false;
   renderLock();
 }
@@ -89,13 +110,14 @@ async function unlock() {
       const salt = b64e(crypto.getRandomValues(new Uint8Array(16)).buffer);
       const k = await deriveKey(pw, salt);
       const verifier = await encryptText(k, VERIFIER_TEXT);
-      vault = { salt, verifier, accounts: [] };
+      vault = { salt, verifier, accounts: [], categories: DEFAULT_CATEGORIES.map(c => ({ ...c })) };
       saveVault(); key = k;
     } else {
       const k = await deriveKey(pw, v.salt);
       const ok = await decryptText(k, v.verifier).then(t => t === VERIFIER_TEXT).catch(() => false);
       if (!ok) return showError('lockError', '主密码不正确。');
       vault = v; key = k;
+      ensureCategories(); saveVault();
     }
     $('lockScreen').hidden = true; $('vaultScreen').hidden = false; $('topActions').hidden = false;
     showError('lockError', '');
@@ -130,10 +152,17 @@ async function copyPasswordById(id, btn) {
   } catch (e) { alert('复制失败：' + (e.message || String(e)) + '。请确认是在 https 或 http://localhost 下打开本页。'); return false; }
 }
 function renderList() {
-  const cats = [...new Set((vault.accounts || []).map(a => a.category).filter(Boolean))].sort();
+  ensureCategories();
+  const cats = (vault.categories || []).map(c => c.name);
   const sel = $('categoryFilter'); const cur = sel.value;
   sel.innerHTML = '<option value="">全部分类</option>' + cats.map(c => `<option>${c.replace(/</g, '&lt;')}</option>`).join('');
   sel.value = cur;
+  const fSel = $('fCategory');
+  if (fSel) {
+    const curF = fSel.value;
+    fSel.innerHTML = cats.map(c => `<option>${c.replace(/</g, '&lt;')}</option>`).join('');
+    if (curF && cats.includes(curF)) fSel.value = curF;
+  }
   const list = filteredAccounts();
   $('emptyMsg').hidden = list.length !== 0 || (vault.accounts || []).length !== 0;
   if ((vault.accounts || []).length === 0) $('emptyMsg').textContent = '还没有账号，点“添加账号”开始添加。';
@@ -213,6 +242,116 @@ async function doImport() {
     $('importFile').value = '';
   } catch (e) { showError('importError', e.message || String(e)); $('importResult').textContent = ''; }
 }
+function downloadFile(filename, content, type) {
+  const blob = new Blob([content], { type });
+  const aEl = document.createElement('a'); aEl.href = URL.createObjectURL(blob); aEl.download = filename; aEl.click(); URL.revokeObjectURL(aEl.href);
+}
+function exportEncryptedBackup() {
+  // 直接导出本地存储的保险库原文：密码只有密文，不含明文密码，主密码本身也不会被导出。
+  const data = loadVault();
+  if (!data) return alert('还没有保险库可以备份。');
+  downloadFile('accounts-backup.json', JSON.stringify(data, null, 2), 'application/json');
+  resetLockTimer();
+}
+async function doRestore() {
+  const file = $('backupFile').files[0];
+  const pw = $('backupPassword').value;
+  if (!file) return showError('restoreError', '请先选择一个加密备份文件。');
+  if (!pw) return showError('restoreError', '请输入导出备份时的主密码。');
+  showError('restoreError', '');
+  $('restoreResult').textContent = '正在恢复…';
+  try {
+    const data = JSON.parse(await file.text());
+    if (!data || typeof data.salt !== 'string' || typeof data.verifier !== 'string' || !Array.isArray(data.accounts)) throw new Error('备份文件格式不对：需要含 salt、verifier 和 accounts 的保险库备份。');
+    const backupKey = await deriveKey(pw, data.salt);
+    const ok = await decryptText(backupKey, data.verifier).then(t => t === VERIFIER_TEXT).catch(() => false);
+    if (!ok) throw new Error('导出备份时的主密码不正确，无法恢复。');
+    const seen = new Set((vault.accounts || []).map(a => (a.name + '\0' + (a.username || '')).toLowerCase()));
+    let added = 0, skipped = 0; const failures = [];
+    for (const r of data.accounts) {
+      try {
+        const name = String(r.name || '').trim();
+        if (!name || !r.passwordEnc) { failures.push('缺少名称或密文'); continue; }
+        const k = (name + '\0' + String(r.username || '').trim()).toLowerCase();
+        if (seen.has(k)) { skipped++; continue; }
+        seen.add(k);
+        const plain = await decryptText(backupKey, r.passwordEnc);
+        const passwordEnc = await encryptText(key, plain);
+        vault.accounts.push({ id: 'a' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7) + added, name, category: String(r.category || '').trim(), username: String(r.username || '').trim(), url: String(r.url || '').trim(), notes: String(r.notes || '').trim(), favorite: !!r.favorite, passwordEnc, createdAt: Date.now(), updatedAt: Date.now() });
+        added++;
+      } catch (e) { failures.push(e.message || String(e)); }
+    }
+    ensureCategories(); saveVault(); renderList(); resetLockTimer();
+    $('restoreResult').textContent = `恢复完成：新增 ${added} 条，跳过重复 ${skipped} 条，失败 ${failures.length} 条。` + (failures.length ? '失败明细：' + failures.slice(0, 20).join('；') : '');
+    $('backupFile').value = ''; $('backupPassword').value = '';
+  } catch (e) { showError('restoreError', e.message || String(e)); $('restoreResult').textContent = ''; }
+}
+function csvEscape(v) {
+  const s = String(v || '');
+  return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+async function exportPlain(format) {
+  if (!$('backupRisk').checked) { alert('请先勾选明文导出的风险确认。'); return; }
+  try {
+    const out = [];
+    for (const a of vault.accounts) out.push({ name: a.name, category: a.category, username: a.username, password: await decryptText(key, a.passwordEnc), url: a.url, notes: a.notes, favorite: a.favorite });
+    if (format === 'csv') {
+      const rows = ['name,category,username,password,url,notes'];
+      out.forEach(o => rows.push([o.name, o.category, o.username, o.password, o.url, o.notes].map(csvEscape).join(',')));
+      downloadFile('accounts-export.csv', '\uFEFF' + rows.join('\n'), 'text/csv;charset=utf-8');
+    } else {
+      downloadFile('accounts-export.json', JSON.stringify(out, null, 2), 'application/json');
+    }
+    resetLockTimer();
+  } catch (e) { alert(e.message || String(e)); }
+}
+function renderCategoryList() {
+  ensureCategories();
+  const ul = $('categoryList'); ul.innerHTML = '';
+  (vault.categories || []).forEach(cat => {
+    const li = document.createElement('li');
+    const dot = document.createElement('span'); dot.textContent = '●'; dot.style.color = cat.color;
+    const nameInput = document.createElement('input'); nameInput.value = cat.name;
+    const colorInput = document.createElement('input'); colorInput.type = 'color'; colorInput.value = /^#[0-9a-fA-F]{6}$/.test(cat.color || '') ? cat.color : '#4f7cff';
+    const saveBtn = document.createElement('button'); saveBtn.type = 'button'; saveBtn.textContent = '保存';
+    saveBtn.addEventListener('click', () => {
+      const newName = nameInput.value.trim(); const newColor = colorInput.value;
+      if (!newName) return showError('categoryError', '分类名称不能为空。');
+      if (newName !== cat.name && vault.categories.some(c => c.name === newName)) return showError('categoryError', '已存在同名分类。');
+      showError('categoryError', '');
+      const oldName = cat.name;
+      cat.name = newName; cat.color = newColor;
+      (vault.accounts || []).forEach(a => { if (a.category === oldName) a.category = newName; });
+      ensureCategories(); saveVault(); renderCategoryList(); renderList(); resetLockTimer();
+    });
+    const delBtn = document.createElement('button'); delBtn.type = 'button'; delBtn.textContent = '删除';
+    delBtn.addEventListener('click', () => {
+      if (cat.name === '其他') return showError('categoryError', '“其他”是兜底分类，不能删除。');
+      if (!confirm(`确定要删除分类“${cat.name}”吗？里面的账号会自动移到“其他”。`)) return;
+      showError('categoryError', '');
+      (vault.accounts || []).forEach(a => { if (a.category === cat.name) a.category = '其他'; });
+      vault.categories = vault.categories.filter(c => c.name !== cat.name);
+      ensureCategories(); saveVault(); renderCategoryList(); renderList(); resetLockTimer();
+    });
+    li.append(dot, nameInput, colorInput, saveBtn, delBtn);
+    ul.appendChild(li);
+  });
+}
+function openCategoryPanel() {
+  renderCategoryList();
+  $('categoryCard').hidden = false; $('formCard').hidden = true; $('detailCard').hidden = true; $('importCard').hidden = true; $('backupCard').hidden = true;
+  showError('categoryError', '');
+}
+function addCategory() {
+  ensureCategories();
+  const name = $('newCategoryName').value.trim(); const color = $('newCategoryColor').value || '#4f7cff';
+  if (!name) return showError('categoryError', '请填写新分类名称。');
+  if (vault.categories.some(c => c.name === name)) return showError('categoryError', '已存在同名分类。');
+  showError('categoryError', '');
+  vault.categories.push({ name, color });
+  saveVault(); renderCategoryList(); renderList(); resetLockTimer();
+  $('newCategoryName').value = '';
+}
 async function showDetail(id) {
   const a = vault.accounts.find(x => x.id === id); if (!a) return;
   currentId = id; currentPlainPassword = null;
@@ -275,7 +414,7 @@ document.addEventListener('DOMContentLoaded', () => {
   $('masterPassword').addEventListener('keydown', e => { if (e.key === 'Enter') unlock(); });
   $('resetBtn').addEventListener('click', () => { if (confirm('确定要清空整个保险库吗？所有账号都会被删除，无法恢复。')) { localStorage.removeItem(STORAGE_KEY); vault = null; key = null; renderLock(); } });
   $('lockBtn').addEventListener('click', lock);
-  $('addBtn').addEventListener('click', () => { openForm(null); $('detailCard').hidden = true; });
+  $('addBtn').addEventListener('click', () => { openForm(null); $('detailCard').hidden = true; $('backupCard').hidden = true; $('categoryCard').hidden = true; });
   $('cancelBtn').addEventListener('click', () => { $('formCard').hidden = true; });
   $('saveBtn').addEventListener('click', saveForm);
   $('togglePassBtn').addEventListener('click', () => { const el = $('fPassword'); el.type = el.type === 'password' ? 'text' : 'password'; $('togglePassBtn').textContent = el.type === 'password' ? '显示' : '隐藏'; });
@@ -294,7 +433,7 @@ document.addEventListener('DOMContentLoaded', () => {
     } catch (e) { alert(e.message || String(e)); }
   });
   $('detailCopyBtn').addEventListener('click', async (e) => { await copyPasswordById(currentId, e.currentTarget); });
-  $('importBtn').addEventListener('click', () => { $('importCard').hidden = false; $('formCard').hidden = true; $('detailCard').hidden = true; $('importResult').textContent = ''; showError('importError', ''); $('importFile').value = ''; });
+  $('importBtn').addEventListener('click', () => { $('importCard').hidden = false; $('formCard').hidden = true; $('detailCard').hidden = true; $('backupCard').hidden = true; $('categoryCard').hidden = true; $('importResult').textContent = ''; showError('importError', ''); $('importFile').value = ''; });
   $('cancelImportBtn').addEventListener('click', () => { $('importCard').hidden = true; });
   $('downloadTemplateBtn').addEventListener('click', () => {
     const csv = 'name,category,username,password,url,notes\n示例平台,社交,示例账号,请替换成真实密码,https://example.com,这是模板里的示例行，导入前请改成你自己的账号\n';
@@ -302,14 +441,17 @@ document.addEventListener('DOMContentLoaded', () => {
     const aEl = document.createElement('a'); aEl.href = URL.createObjectURL(blob); aEl.download = 'accounts-import-template.csv'; aEl.click(); URL.revokeObjectURL(aEl.href);
   });
   $('doImportBtn').addEventListener('click', doImport);
-  $('exportBtn').addEventListener('click', async () => {
-    try {
-      const out = [];
-      for (const a of vault.accounts) out.push({ name: a.name, category: a.category, username: a.username, password: await decryptText(key, a.passwordEnc), url: a.url, notes: a.notes, favorite: a.favorite });
-      const blob = new Blob([JSON.stringify(out, null, 2)], { type: 'application/json' });
-      const aEl = document.createElement('a'); aEl.href = URL.createObjectURL(blob); aEl.download = 'accounts-export.json'; aEl.click(); URL.revokeObjectURL(aEl.href);
-    } catch (e) { alert(e.message || String(e)); }
-  });
+  $('backupBtn').addEventListener('click', () => { $('backupCard').hidden = false; $('formCard').hidden = true; $('detailCard').hidden = true; $('importCard').hidden = true; $('categoryCard').hidden = true; showError('restoreError', ''); $('restoreResult').textContent = ''; });
+  $('cancelBackupBtn').addEventListener('click', () => { $('backupCard').hidden = true; });
+  $('exportBackupBtn').addEventListener('click', exportEncryptedBackup);
+  $('doRestoreBtn').addEventListener('click', doRestore);
+  $('exportPlainJsonBtn').addEventListener('click', () => exportPlain('json'));
+  $('exportPlainCsvBtn').addEventListener('click', () => exportPlain('csv'));
+  $('categoryBtn').addEventListener('click', openCategoryPanel);
+  $('manageCategoriesBtn').addEventListener('click', openCategoryPanel);
+  $('manageCategoriesBtn2').addEventListener('click', openCategoryPanel);
+  $('cancelCategoryBtn').addEventListener('click', () => { $('categoryCard').hidden = true; });
+  $('addCategoryBtn').addEventListener('click', addCategory);
   $('changePassBtn').addEventListener('click', () => { $('changePassCard').hidden = false; });
   $('cancelChangeBtn').addEventListener('click', () => { $('changePassCard').hidden = true; });
   $('doChangeBtn').addEventListener('click', async () => {

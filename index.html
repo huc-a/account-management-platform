@@ -14,7 +14,8 @@
   </div>
   <div class="top-actions" id="topActions" hidden>
     <button id="importBtn" type="button">批量导入</button>
-    <button id="exportBtn" type="button">导出</button>
+    <button id="backupBtn" type="button">备份与导出</button>
+    <button id="categoryBtn" type="button">分类</button>
     <button id="changePassBtn" type="button">修改主密码</button>
     <button id="lockBtn" type="button">锁定</button>
   </div>
@@ -42,6 +43,7 @@
       <select id="categoryFilter" aria-label="分类筛选">
         <option value="">全部分类</option>
       </select>
+      <button id="manageCategoriesBtn" type="button">管理分类</button>
       <label class="check"><input id="favOnly" type="checkbox"> 仅常用</label>
       <button id="addBtn" type="button" class="primary">添加账号</button>
     </div>
@@ -51,7 +53,8 @@
       <input id="editId" type="hidden">
       <div class="grid">
         <label>名称 *<input id="fName" placeholder="例如：邮箱、银行、GitHub"></label>
-        <label>分类<input id="fCategory" placeholder="例如：金融、社交、工作"></label>
+        <label>分类<select id="fCategory"></select></label>
+        <button id="manageCategoriesBtn2" type="button">管理分类</button>
         <label>用户名<input id="fUsername" placeholder="用户名或邮箱"></label>
         <label>网址<input id="fUrl" placeholder="https://example.com"></label>
       </div>
@@ -94,6 +97,53 @@
       <div class="row">
         <button id="doImportBtn" type="button" class="primary">开始导入</button>
         <button id="cancelImportBtn" type="button">取消</button>
+      </div>
+    </section>
+
+    <section id="backupCard" class="card" hidden>
+      <h2>备份与导出</h2>
+      <h3>导出加密备份</h3>
+      <p class="hint">导出来的是整个保险库，只有密文、没有明文密码，可以存到别处做备份。主密码本身不会被导出，恢复时需要你输入导出备份时的主密码。</p>
+      <div class="row">
+        <button id="exportBackupBtn" type="button" class="primary">导出加密备份</button>
+      </div>
+      <h3>从备份恢复</h3>
+      <p class="hint">选一个加密备份文件，输入导出备份时的主密码，账号会重新加密存进当前保险库。名称加用户名相同的会跳过，恢复完会显示新增、跳过、失败的数量。</p>
+      <label>选择备份文件
+        <input id="backupFile" type="file" accept=".json,application/json">
+      </label>
+      <label>导出备份时的主密码
+        <input id="backupPassword" type="password" placeholder="输入导出备份时的主密码">
+      </label>
+      <p id="restoreResult" class="hint"></p>
+      <p class="error" id="restoreError" hidden></p>
+      <div class="row">
+        <button id="doRestoreBtn" type="button" class="primary">开始恢复</button>
+      </div>
+      <h3>导出明文</h3>
+      <p class="hint">明文导出会把密码原样写进文件，文件一旦泄露，账号就等于公开了。请只在自己信任的设备上操作，导出后妥善保管，不要发给任何人，也不要发在聊天里。</p>
+      <label class="check"><input id="backupRisk" type="checkbox"> 我已了解明文导出的风险，确认导出</label>
+      <div class="row">
+        <button id="exportPlainJsonBtn" type="button">导出明文 JSON</button>
+        <button id="exportPlainCsvBtn" type="button">导出明文 CSV</button>
+      </div>
+      <div class="row">
+        <button id="cancelBackupBtn" type="button">关闭</button>
+      </div>
+    </section>
+
+    <section id="categoryCard" class="card" hidden>
+      <h2>管理分类</h2>
+      <p class="hint">新增分类填名称、选颜色，同名会被拦下。改名后所有用这个分类的账号会一起变；改颜色只改显示；删除分类后，里面的账号会自动移到“其他”，不会丢账号。“其他”本身作为兜底分类不能删除。</p>
+      <ul id="categoryList" class="list"></ul>
+      <div class="grid">
+        <label>新分类名称<input id="newCategoryName" placeholder="例如：学习、出行"></label>
+        <label>颜色<input id="newCategoryColor" type="color" value="#4f7cff"></label>
+      </div>
+      <p class="error" id="categoryError" hidden></p>
+      <div class="row">
+        <button id="addCategoryBtn" type="button" class="primary">添加分类</button>
+        <button id="cancelCategoryBtn" type="button">关闭</button>
       </div>
     </section>
 
